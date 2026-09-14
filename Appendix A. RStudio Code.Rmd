@@ -1,0 +1,3789 @@
+---
+title: "ETT Dissertation"
+author: "Anonymous"
+date: "SEP2026"
+output: word_document
+---
+
+```{r import file, echo=TRUE, message=FALSE, warning=FALSE}
+if (!requireNamespace("readr", quietly = TRUE)) {
+  install.packages("readr")
+}
+
+library(readr)
+
+protein_quants_sci_rep <- read_csv("protein_quants_sci_rep.csv")
+```
+
+```{r load packages, message=FALSE, warning=FALSE}
+# --------------------------------------------------
+# Safe package installation and loading
+# --------------------------------------------------
+
+install_if_missing_cran <- function(pkg) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+  }
+  suppressPackageStartupMessages(
+    library(pkg, character.only = TRUE)
+  )
+}
+
+install_if_missing_bioc <- function(pkg) {
+  if (!requireNamespace("BiocManager", quietly = TRUE)) {
+    install.packages("BiocManager")
+  }
+  
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    BiocManager::install(pkg, ask = FALSE, update = TRUE)
+  }
+  
+  suppressPackageStartupMessages(
+    library(pkg, character.only = TRUE)
+  )
+}
+
+# --------------------------------------------------
+# CRAN packages
+# --------------------------------------------------
+
+cran_packages <- c(
+  "readr",
+  "dplyr",
+  "tidyr",
+  "tibble",
+  "ggplot2",
+  "pheatmap",
+  "msigdbr",
+  "janitor",
+  "purrr",
+  "stringr",
+  "dynamicTreeCut"
+)
+
+invisible(lapply(cran_packages, install_if_missing_cran))
+
+# --------------------------------------------------
+# Bioconductor packages
+# IMPORTANT: enrichplot must load before clusterProfiler
+# --------------------------------------------------
+
+bioc_packages <- c(
+  "limma",
+  "org.Hs.eg.db",
+  "AnnotationDbi",
+  "fgsea",
+  "enrichplot",
+  "clusterProfiler"
+)
+
+invisible(lapply(bioc_packages, install_if_missing_bioc))
+
+cat("All required packages installed and loaded successfully.\n")
+```
+
+```{r create expression matrix}
+# Identify columns that are NOT metadata
+protein_cols <- setdiff(
+  colnames(protein_quants_sci_rep),
+  c("Subject", "Gender", "Age.at.time.of.LP..yrs.", "Pathology_group", "Dementia_group")
+)
+
+# Show first few protein column names
+head(protein_cols)
+
+# Subset only the numeric protein data
+numeric_protein_data <- protein_quants_sci_rep[, protein_cols]
+
+# Select numeric columns
+protein_cols <- names(protein_quants_sci_rep)[
+  sapply(protein_quants_sci_rep, is.numeric)
+]
+
+# Expression matrix
+exprs <- as.matrix(protein_quants_sci_rep[, protein_cols])
+
+# Quick check
+dim(exprs)
+head(exprs[, 1:5])
+
+```
+
+```{r determine significant proteisn AD vs CU, echo=TRUE, message=FALSE, warning=FALSE}
+# Define metadata columns to exclude
+metadata_cols <- c(
+  "Subject", "Gender", "Age.at.time.of.LP..yrs.", 
+  "Pathology_group", "Dementia_group"
+)
+
+# Protein columns = numeric columns excluding metadata
+protein_cols <- setdiff(
+  names(protein_quants_sci_rep)[sapply(protein_quants_sci_rep, is.numeric)],
+  metadata_cols
+)
+
+# Define groups
+group <- protein_quants_sci_rep$Pathology_group
+table(group)
+
+# Initialize results data frame
+results <- data.frame(
+  Protein = protein_cols,
+  t_stat = NA,
+  p_value = NA,
+  adj_p_value = NA,
+  stringsAsFactors = FALSE
+)
+
+# T-test (AD vs CU)
+for (i in seq_along(protein_cols)) {
+  protein <- protein_cols[i]
+  ad_values <- protein_quants_sci_rep[[protein]][group == "AD"]
+  cu_values <- protein_quants_sci_rep[[protein]][group == "CU"]
+  
+  test <- t.test(ad_values, cu_values)
+  
+  results$t_stat[i] <- test$statistic
+  results$p_value[i] <- test$p.value
+}
+
+# Adjust p-values for multiple testing (FDR)
+results$adj_p_value <- p.adjust(results$p_value, method = "fdr")
+
+# Filter significant proteins (FDR < 0.05)
+sig_proteins <- results[results$adj_p_value < 0.05, ]
+sig_proteins <- sig_proteins[order(sig_proteins$adj_p_value), ]
+
+# View top significant proteins
+head(sig_proteins)
+
+# Write significant proteins to CSV
+write.csv(sig_proteins, "sig_proteins_ad_vs_cu.csv", row.names = FALSE)
+```
+
+```{r add direction and group means to significant proteins, echo=TRUE, message=FALSE, warning=FALSE}
+
+library(dplyr)
+
+# --------------------------------------------------
+# Add AD and CU mean abundance and direction
+# --------------------------------------------------
+
+sig_proteins_direction <- sig_proteins %>%
+  rowwise() %>%
+  mutate(
+    Mean_AD = mean(
+      protein_quants_sci_rep[[Protein]][
+        protein_quants_sci_rep$Pathology_group == "AD"
+      ],
+      na.rm = TRUE
+    ),
+
+    Mean_CU = mean(
+      protein_quants_sci_rep[[Protein]][
+        protein_quants_sci_rep$Pathology_group == "CU"
+      ],
+      na.rm = TRUE
+    ),
+
+    Mean_Difference_AD_minus_CU = Mean_AD - Mean_CU,
+
+    Direction = case_when(
+      Mean_Difference_AD_minus_CU > 0 ~ "Higher in AD",
+      Mean_Difference_AD_minus_CU < 0 ~ "Lower in AD",
+      TRUE ~ "No difference"
+    )
+  ) %>%
+  ungroup() %>%
+  select(
+    Protein,
+    Mean_AD,
+    Mean_CU,
+    Mean_Difference_AD_minus_CU,
+    Direction,
+    t_stat,
+    p_value,
+    adj_p_value
+  ) %>%
+  arrange(adj_p_value)
+
+# --------------------------------------------------
+# View results
+# --------------------------------------------------
+
+print(sig_proteins_direction)
+
+# Number of significant proteins higher and lower in AD
+direction_summary <- sig_proteins_direction %>%
+  count(Direction, name = "Number_of_Proteins")
+
+print(direction_summary)
+
+# --------------------------------------------------
+# Export
+# --------------------------------------------------
+
+write.csv(
+  sig_proteins_direction,
+  "sig_proteins_ad_vs_cu_with_direction.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  direction_summary,
+  "sig_proteins_ad_vs_cu_direction_summary.csv",
+  row.names = FALSE
+)
+```
+
+```{r heatmap of significant proteins, echo=TRUE, message=FALSE, warning=FALSE}
+
+library(dplyr)
+library(pheatmap)
+
+sig_protein_names <- sig_proteins$Protein
+
+# Dementia_group is retained as an annotation
+heatmap_data <- protein_quants_sci_rep %>%
+  filter(Pathology_group %in% c("AD", "CU"))
+
+heatmap_mat <- heatmap_data %>%
+  dplyr::select(all_of(sig_protein_names)) %>%
+  as.matrix()
+
+rownames(heatmap_mat) <- heatmap_data$Subject
+heatmap_mat <- t(heatmap_mat)
+
+# Remove proteins that cannot be scaled
+heatmap_mat <- heatmap_mat[
+  apply(heatmap_mat, 1, function(x) {
+    vals <- x[!is.na(x)]
+    length(vals) > 1 && sd(vals) > 0
+  }),
+  ,
+  drop = FALSE
+]
+
+# Impute missing values by protein mean
+heatmap_mat <- t(apply(heatmap_mat, 1, function(x) {
+  x[is.na(x)] <- mean(x, na.rm = TRUE)
+  x
+}))
+
+# Z-score proteins across AD/CU subjects
+heatmap_scaled <- t(scale(t(heatmap_mat)))
+
+# Annotation: no age, no gender
+annotation_col <- heatmap_data %>%
+  dplyr::select(Subject, Pathology_group, Dementia_group) %>%
+  distinct() %>%
+  as.data.frame()
+
+rownames(annotation_col) <- annotation_col$Subject
+annotation_col$Subject <- NULL
+
+# Annotation: no age, no gender
+annotation_col <- heatmap_data %>%
+  dplyr::select(Subject, Pathology_group, Dementia_group) %>%
+  distinct() %>%
+  as.data.frame()
+
+rownames(annotation_col) <- annotation_col$Subject
+annotation_col$Subject <- NULL
+
+annotation_col <- annotation_col[colnames(heatmap_scaled), , drop = FALSE]
+
+# --------------------------------------------------
+annotation_colors <- list(
+
+  Pathology_group = c(
+    AD = "#7B3294",   # purple
+    CU = "#FFB6C1"    # blue
+  ),
+
+  Dementia_group = c(
+    CU  = "#1B9E77",  # green
+    MCI = "#74ADD1",  # orange
+    DEM = "#FDAE61"   # red
+  )
+)
+
+# Convert protein IDs to gene symbols for heatmap display
+rownames(heatmap_scaled) <- sub("_.*$", "", rownames(heatmap_scaled))
+
+# --------------------------------------------------
+pheatmap(
+  heatmap_scaled,
+  scale = "none",
+
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "correlation",
+  clustering_method = "average",
+
+  treeheight_row = 0,
+  treeheight_col = 0,
+
+  annotation_col = annotation_col,
+
+  # ADD THIS LINE
+  annotation_colors = annotation_colors,
+
+  show_rownames = TRUE,
+  show_colnames = FALSE,
+
+  fontsize_row = 7,
+  border_color = NA,
+
+  main = "Significant Proteins: Pathology AD vs CU"
+)
+```
+```{r heatmap of AD vs CU significant proteins within AD pathology group, echo=TRUE, message=FALSE, warning=FALSE}
+
+library(dplyr)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+
+# --------------------------------------------------
+# 1. Significant proteins from the AD vs CU comparison
+# --------------------------------------------------
+
+sig_protein_names <- sig_proteins$Protein
+
+# --------------------------------------------------
+# 2. Retain the full AD + CU pathology cohort
+#    This cohort is used to calculate z-scores
+# --------------------------------------------------
+
+heatmap_data_all <- protein_quants_sci_rep %>%
+  filter(Pathology_group %in% c("AD", "CU")) %>%
+  mutate(
+    Subject = as.character(Subject)
+  )
+
+# --------------------------------------------------
+# 3. Create protein-by-subject matrix
+# --------------------------------------------------
+
+heatmap_mat_all <- heatmap_data_all %>%
+  dplyr::select(all_of(sig_protein_names)) %>%
+  as.matrix()
+
+rownames(heatmap_mat_all) <- heatmap_data_all$Subject
+
+# Proteins as rows, subjects as columns
+heatmap_mat_all <- t(heatmap_mat_all)
+
+# --------------------------------------------------
+# 4. Remove proteins that cannot be standardized
+# --------------------------------------------------
+
+heatmap_mat_all <- heatmap_mat_all[
+  apply(
+    heatmap_mat_all,
+    1,
+    function(x) {
+      observed_values <- x[!is.na(x)]
+
+      length(observed_values) > 1 &&
+        sd(observed_values) > 0
+    }
+  ),
+  ,
+  drop = FALSE
+]
+
+# --------------------------------------------------
+# 5. Impute missing values using each protein's mean
+# --------------------------------------------------
+
+heatmap_mat_all <- t(
+  apply(
+    heatmap_mat_all,
+    1,
+    function(x) {
+      x[is.na(x)] <- mean(x, na.rm = TRUE)
+      x
+    }
+  )
+)
+
+# --------------------------------------------------
+# 6. Calculate protein-wise z-scores across the full
+#    AD + CU pathology cohort
+# --------------------------------------------------
+
+heatmap_scaled_all <- t(scale(t(heatmap_mat_all)))
+
+# --------------------------------------------------
+# 7. Convert protein IDs to gene symbols
+# --------------------------------------------------
+
+rownames(heatmap_scaled_all) <- sub(
+  "_.*$",
+  "",
+  rownames(heatmap_scaled_all)
+)
+
+rownames(heatmap_scaled_all) <- make.unique(
+  rownames(heatmap_scaled_all)
+)
+
+# --------------------------------------------------
+# 8. Identify AD pathology subjects and retain all
+#    dementia groups: CU, MCI, and DEM
+# --------------------------------------------------
+
+ad_subject_info <- heatmap_data_all %>%
+  filter(
+    Pathology_group == "AD",
+    Dementia_group %in% c("CU", "MCI", "DEM")
+  ) %>%
+  dplyr::select(
+    Subject,
+    Dementia_group
+  ) %>%
+  distinct() %>%
+  mutate(
+    Dementia_group = factor(
+      Dementia_group,
+      levels = c("CU", "MCI", "DEM")
+    )
+  ) %>%
+  arrange(Dementia_group, Subject)
+
+# --------------------------------------------------
+# 9. Restrict displayed columns to AD pathology subjects
+# --------------------------------------------------
+
+ad_subjects <- ad_subject_info$Subject
+
+heatmap_scaled_ad <- heatmap_scaled_all[
+  ,
+  ad_subjects,
+  drop = FALSE
+]
+
+# --------------------------------------------------
+# 10. Create column split for CU, MCI, and DEM
+# --------------------------------------------------
+
+column_split <- ad_subject_info$Dementia_group
+names(column_split) <- ad_subject_info$Subject
+
+column_split <- column_split[
+  colnames(heatmap_scaled_ad)
+]
+
+column_split <- factor(
+  column_split,
+  levels = c("CU", "MCI", "DEM")
+)
+
+# --------------------------------------------------
+# 11. Define red-white-blue z-score color scale
+# --------------------------------------------------
+
+z_score_colors <- colorRamp2(
+  c(-2, 0, 2),
+  c("#313695", "white", "#D73027")
+)
+
+# --------------------------------------------------
+# 12. Draw heatmap
+# --------------------------------------------------
+
+heatmap_plot <- Heatmap(
+  heatmap_scaled_ad,
+
+  name = "Expression\nz-score",
+  col = z_score_colors,
+
+  # Split AD pathology subjects by dementia group
+  column_split = column_split,
+
+  # Preserve CU -> MCI -> DEM order
+  cluster_column_slices = FALSE,
+
+  # Cluster subjects within each dementia group
+  cluster_columns = TRUE,
+  clustering_distance_columns = "pearson",
+  clustering_method_columns = "average",
+
+  # Cluster proteins across all displayed AD subjects
+  cluster_rows = TRUE,
+  clustering_distance_rows = "pearson",
+  clustering_method_rows = "average",
+
+  show_column_names = FALSE,
+  show_row_names = TRUE,
+
+  row_names_side = "right",
+  row_names_gp = gpar(fontsize = 14),
+
+  show_column_dend = FALSE,
+  show_row_dend = TRUE,
+
+  row_dend_width = unit(12, "mm"),
+
+  column_gap = unit(2, "mm"),
+  border = TRUE,
+
+  column_title = c("CU", "MCI", "DEM"),
+
+  column_title_gp = gpar(
+    fontsize = 12,
+    fontface = "bold"
+  ),
+
+  row_title = "Proteins significant in AD versus CU pathology",
+
+  heatmap_legend_param = list(
+    title = "Expression\nz-score",
+    at = c(-2, -1, 0, 1, 2)
+  )
+)
+
+draw(
+  heatmap_plot,
+  heatmap_legend_side = "right"
+)
+```
+
+```{r combine files for full significant protein list, echo=TRUE, message=FALSE, warning=FALSE}
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+# --------------------------------------------------
+# Extract UniProt IDs
+
+pq_to_id <- function(x) {
+
+  x <- toupper(x)
+
+  rhs <- sub("^[^_]+_", "", x)
+
+  if (identical(rhs, x) || rhs == "") {
+    return(NA_character_)
+  }
+
+  ids <- unlist(strsplit(rhs, ";"))
+
+  ids <- trimws(ids)
+
+  ids <- ids[ids != ""]
+
+  ids <- ids[grepl(
+    "^[OPQ][0-9][A-Z0-9]{3}[0-9]$|^[A-NR-Z][0-9][A-Z0-9]{3}[0-9]$|^A0A[0-9A-Z]{7}$",
+    ids
+  )]
+
+  if (length(ids) == 0) {
+    return(NA_character_)
+  }
+
+  paste(unique(ids), collapse = ";")
+}
+
+# --------------------------------------------------
+# ALL proteins measured in ProteinQuant
+# --------------------------------------------------
+
+metadata_cols <- c(
+  "Subject",
+  "Gender",
+  "Age.at.time.of.LP..yrs.",
+  "Pathology_group",
+  "Dementia_group"
+)
+
+proteinquant_all <- tibble(
+  ProteinName = setdiff(names(protein_quants_sci_rep), metadata_cols)
+) %>%
+  mutate(
+    UniProt = vapply(ProteinName, pq_to_id, character(1))
+  ) %>%
+  filter(!is.na(UniProt)) %>%
+
+  # Split proteins with multiple UniProt IDs
+  separate_rows(UniProt, sep = ";") %>%
+
+  distinct(UniProt, .keep_all = TRUE)
+
+# --------------------------------------------------
+# Significant proteins from ProteinQuant
+# --------------------------------------------------
+
+proteinquant_sig <- sig_proteins %>%
+  mutate(
+    ProteinName = Protein,
+    UniProt = vapply(ProteinName, pq_to_id, character(1)),
+    ProteinQuant_significant = TRUE
+  ) %>%
+  filter(!is.na(UniProt)) %>%
+
+  # Split multi-UniProt proteins
+  separate_rows(UniProt, sep = ";") %>%
+
+  distinct(UniProt, .keep_all = TRUE)
+
+# --------------------------------------------------
+# Tijms proteins
+# Assumes all proteins in Tijms are significant
+# --------------------------------------------------
+
+tijms_sig <- read_csv(
+  "S Table 4, Tijms et al 2024.csv",
+  skip = 3
+) %>%
+  janitor::clean_names() %>%
+  mutate(
+    UniProt = toupper(uniprot),
+    Tijms_significant = TRUE
+  ) %>%
+  select(UniProt, Tijms_significant) %>%
+  distinct()
+
+# --------------------------------------------------
+# Keep Tijms proteins measurable in ProteinQuant
+# --------------------------------------------------
+
+tijms_measured_in_proteinquant <- proteinquant_all %>%
+  inner_join(tijms_sig, by = "UniProt")
+
+# --------------------------------------------------
+# FINAL combined significant proteins
+# --------------------------------------------------
+
+selected_sig <- bind_rows(
+
+  proteinquant_sig %>%
+    mutate(
+      Source = "ProteinQuant"
+    ) %>%
+    select(UniProt, ProteinName, Source),
+
+  tijms_measured_in_proteinquant %>%
+    mutate(
+      Source = "Tijms"
+    ) %>%
+    select(UniProt, ProteinName, Source)
+
+) %>%
+
+  distinct(UniProt, .keep_all = TRUE)
+
+# --------------------------------------------------
+# Counts
+# --------------------------------------------------
+
+cat("Total combined significant proteins:", nrow(selected_sig), "\n")
+
+# Export
+write.csv(
+  selected_sig,
+  "ProteinQuant_Tijms_combined_Sig_Proteins.csv",
+  row.names = FALSE
+)
+
+head(selected_sig)
+```
+
+```{r dynamic tree cut to cluster subjects, echo=TRUE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(dynamicTreeCut)
+
+# --------------------------------------------------
+# 1. Select significant protein features
+# --------------------------------------------------
+
+sig_feature_names <- selected_sig %>%
+  pull(ProteinName) %>%
+  unique()
+
+sig_feature_names <- sig_feature_names[
+  sig_feature_names %in% names(protein_quants_sci_rep)
+]
+
+# --------------------------------------------------
+# 2. Build AD-only subject matrix
+# Rows = AD subjects, columns = significant proteins
+# --------------------------------------------------
+
+ad_subject_data <- protein_quants_sci_rep %>%
+  filter(Pathology_group == "AD") %>%
+  select(
+    Subject,
+    Dementia_group,
+    all_of(sig_feature_names)
+  )
+
+ad_expr_mat <- ad_subject_data %>%
+  select(all_of(sig_feature_names)) %>%
+  as.matrix()
+
+rownames(ad_expr_mat) <- ad_subject_data$Subject
+
+# --------------------------------------------------
+# 3. Impute missing values by protein mean
+# --------------------------------------------------
+
+ad_expr_mat <- apply(ad_expr_mat, 2, function(x) {
+  x[is.na(x)] <- mean(x, na.rm = TRUE)
+  x
+})
+
+ad_expr_mat <- as.matrix(ad_expr_mat)
+rownames(ad_expr_mat) <- ad_subject_data$Subject
+
+# --------------------------------------------------
+# 4. Remove proteins with zero variance across AD subjects
+# --------------------------------------------------
+
+ad_expr_mat <- ad_expr_mat[
+  ,
+  apply(ad_expr_mat, 2, function(x) sd(x, na.rm = TRUE) > 0),
+  drop = FALSE
+]
+
+# --------------------------------------------------
+# 5. Z-score proteins across AD subjects
+# --------------------------------------------------
+
+ad_expr_scaled <- scale(ad_expr_mat)
+
+# --------------------------------------------------
+# 6. Cluster AD subjects
+# --------------------------------------------------
+
+subject_dist <- dist(ad_expr_scaled, method = "euclidean")
+
+subject_tree <- hclust(
+  subject_dist,
+  method = "ward.D2"
+)
+
+# --------------------------------------------------
+# 7. Dynamic tree cut for AD subject clusters
+# --------------------------------------------------
+
+subject_clusters <- cutreeDynamic(
+  dendro = subject_tree,
+  distM = as.matrix(subject_dist),
+  deepSplit = 2,
+  pamRespectsDendro = FALSE,
+  minClusterSize = 5
+)
+
+names(subject_clusters) <- rownames(ad_expr_scaled)
+
+subject_cluster_df <- data.frame(
+  Subject = names(subject_clusters),
+  SubjectCluster = subject_clusters
+)
+
+# --------------------------------------------------
+# 8. Subject cluster summary table
+# --------------------------------------------------
+
+subject_cluster_summary <- subject_cluster_df %>%
+  count(SubjectCluster, name = "Number_of_Subjects") %>%
+  arrange(SubjectCluster)
+
+print(subject_cluster_summary)
+
+# --------------------------------------------------
+# 9. Subject dendrogram with dynamic clusters
+# --------------------------------------------------
+
+n_subject_clusters <- length(unique(subject_clusters[subject_clusters > 0]))
+
+plot(
+  subject_tree,
+  labels = FALSE,
+  main = paste("AD subject clustering:", n_subject_clusters, "dynamic clusters"),
+  xlab = "",
+  ylab = "Height",
+  sub = "",
+  hang = 0.03
+)
+
+if (n_subject_clusters > 1) {
+  rect.hclust(
+    subject_tree,
+    k = n_subject_clusters,
+    border = 2:(n_subject_clusters + 1)
+  )
+}
+
+
+# --------------------------------------------------
+# 11. Export outputs
+# --------------------------------------------------
+
+write.csv(
+  subject_cluster_df,
+  "AD_Subject_DynamicTreeCut_Clusters.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  subject_cluster_summary,
+  "AD_Subject_DynamicTreeCut_Cluster_Summary.csv",
+  row.names = FALSE
+)
+```
+```{r calculate centroid scores, echo=TRUE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+top_n_per_cluster <- 50
+driver_score_threshold <- 0.5
+
+# --------------------------------------------------
+# 1. Long expression table
+# --------------------------------------------------
+
+ad_expr_long <- as.data.frame(ad_expr_scaled) %>%
+  rownames_to_column("Subject") %>%
+  mutate(Subject = as.character(Subject)) %>%
+  left_join(
+    subject_cluster_df %>%
+      mutate(Subject = as.character(Subject)),
+    by = "Subject"
+  ) %>%
+  pivot_longer(
+    cols = -c(Subject, SubjectCluster),
+    names_to = "ProteinName",
+    values_to = "ScaledExpression"
+  )
+
+# --------------------------------------------------
+# 2. Centroid expression per protein per cluster
+# --------------------------------------------------
+
+centroid_df <- ad_expr_long %>%
+  group_by(SubjectCluster, ProteinName) %>%
+  summarize(
+    CentroidExpression = mean(ScaledExpression, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# --------------------------------------------------
+# 3. Centroid-ranked high/low drivers
+# --------------------------------------------------
+
+cluster_positive_drivers <- centroid_df %>%
+  group_by(SubjectCluster) %>%
+  arrange(desc(CentroidExpression), .by_group = TRUE) %>%
+  slice_head(n = top_n_per_cluster) %>%
+  ungroup() %>%
+  mutate(DriverDirection = "High in cluster")
+
+cluster_negative_drivers <- centroid_df %>%
+  group_by(SubjectCluster) %>%
+  arrange(CentroidExpression, .by_group = TRUE) %>%
+  slice_head(n = top_n_per_cluster) %>%
+  ungroup() %>%
+  mutate(DriverDirection = "Low in cluster")
+
+cluster_specific_drivers_centroid <- bind_rows(
+  cluster_positive_drivers,
+  cluster_negative_drivers
+) %>%
+  arrange(SubjectCluster, DriverDirection, desc(abs(CentroidExpression)))
+
+# --------------------------------------------------
+# 4. Differential driver scores:
+#    cluster mean minus mean of all other AD clusters
+# --------------------------------------------------
+
+cluster_driver_scores <- centroid_df %>%
+  rowwise() %>%
+  mutate(
+    OtherMean = mean(
+      ad_expr_long$ScaledExpression[
+        ad_expr_long$ProteinName == ProteinName &
+          ad_expr_long$SubjectCluster != SubjectCluster
+      ],
+      na.rm = TRUE
+    ),
+    DriverScore = CentroidExpression - OtherMean,
+    DriverDirection = case_when(
+      DriverScore > 0 ~ "High in cluster vs others",
+      DriverScore < 0 ~ "Low in cluster vs others",
+      TRUE ~ "No difference"
+    )
+  ) %>%
+  ungroup() %>%
+  rename(ClusterMean = CentroidExpression)
+
+cluster_high_drivers <- cluster_driver_scores %>%
+  filter(DriverScore >= driver_score_threshold) %>%
+  group_by(SubjectCluster) %>%
+  slice_max(order_by = DriverScore, n = top_n_per_cluster, with_ties = FALSE) %>%
+  ungroup()
+
+cluster_low_drivers <- cluster_driver_scores %>%
+  filter(DriverScore <= -driver_score_threshold) %>%
+  group_by(SubjectCluster) %>%
+  slice_min(order_by = DriverScore, n = top_n_per_cluster, with_ties = FALSE) %>%
+  ungroup()
+
+cluster_specific_drivers <- bind_rows(
+  cluster_high_drivers,
+  cluster_low_drivers
+) %>%
+  arrange(SubjectCluster, desc(abs(DriverScore)))
+
+# --------------------------------------------------
+# 5. Reusable annotation helper
+# --------------------------------------------------
+
+annotate_protein_table <- function(df) {
+  df_annotated <- df %>%
+    mutate(UniProt = vapply(ProteinName, pq_to_id, character(1))) %>%
+    filter(!is.na(UniProt)) %>%
+    separate_rows(UniProt, sep = ";")
+  
+  annotation_df <- AnnotationDbi::select(
+    org.Hs.eg.db,
+    keys = unique(df_annotated$UniProt),
+    columns = c("ENTREZID", "SYMBOL"),
+    keytype = "UNIPROT"
+  ) %>%
+    distinct(UNIPROT, ENTREZID, SYMBOL)
+  
+  df_annotated %>%
+    left_join(annotation_df, by = c("UniProt" = "UNIPROT")) %>%
+    rename(
+      ENTREZ = ENTREZID,
+      GeneSymbol = SYMBOL
+    )
+}
+
+# --------------------------------------------------
+# 6. Annotated centroid and differential drivers
+# --------------------------------------------------
+
+cluster_specific_drivers_with_entrez <- annotate_protein_table(
+  cluster_specific_drivers_centroid
+) %>%
+  arrange(SubjectCluster, DriverDirection, desc(abs(CentroidExpression)))
+
+cluster_specific_drivers_annotated <- annotate_protein_table(
+  cluster_specific_drivers
+) %>%
+  arrange(SubjectCluster, desc(abs(DriverScore)))
+
+# --------------------------------------------------
+# 7. Shared behavior table
+# --------------------------------------------------
+
+shared_cluster_behavior <- cluster_driver_scores %>%
+  mutate(
+    DirectionClass = case_when(
+      DriverScore >= driver_score_threshold ~ "High",
+      DriverScore <= -driver_score_threshold ~ "Low",
+      TRUE ~ "Neutral"
+    )
+  ) %>%
+  filter(DirectionClass != "Neutral") %>%
+  group_by(ProteinName, DirectionClass) %>%
+  summarize(
+    Clusters = paste(sort(unique(SubjectCluster)), collapse = ";"),
+    Number_of_Clusters = n_distinct(SubjectCluster),
+    MaxAbsDriverScore = max(abs(DriverScore), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Number_of_Clusters), desc(MaxAbsDriverScore))
+
+# --------------------------------------------------
+# 8. Summaries
+# --------------------------------------------------
+
+centroid_driver_summary <- cluster_specific_drivers_with_entrez %>%
+  count(SubjectCluster, DriverDirection, name = "Number_of_Driver_Rows") %>%
+  arrange(SubjectCluster, DriverDirection)
+
+driver_summary <- cluster_specific_drivers_annotated %>%
+  count(SubjectCluster, DriverDirection, name = "Number_of_Driver_Rows") %>%
+  arrange(SubjectCluster, DriverDirection)
+
+print(centroid_driver_summary)
+print(driver_summary)
+
+print(head(cluster_specific_drivers_with_entrez, 30))
+print(head(cluster_specific_drivers_annotated, 30))
+
+
+```
+```{r  determine defining (absolute) proteins using centroid}
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+# --------------------------------------------------
+# 1. Long expression table
+# --------------------------------------------------
+
+ad_expr_long <- as.data.frame(ad_expr_scaled) %>%
+  rownames_to_column("Subject") %>%
+  mutate(Subject = as.character(Subject)) %>%
+  left_join(
+    subject_cluster_df %>%
+      mutate(Subject = as.character(Subject)),
+    by = "Subject"
+  ) %>%
+  pivot_longer(
+    cols = -c(Subject, SubjectCluster),
+    names_to = "ProteinName",
+    values_to = "ScaledExpression"
+  )
+
+# --------------------------------------------------
+# 2. Centroid-based protein scores per cluster
+# --------------------------------------------------
+
+centroid_driver_scores <- ad_expr_long %>%
+  group_by(SubjectCluster, ProteinName) %>%
+  summarize(
+    CentroidScore = mean(ScaledExpression, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    CentroidScore_abs = abs(CentroidScore),
+    Regulation = case_when(
+      CentroidScore > 0 ~ "Upregulated in cluster",
+      CentroidScore < 0 ~ "Downregulated in cluster",
+      TRUE ~ "No difference"
+    )
+  )
+
+# --------------------------------------------------
+# 3. Add UniProt, ENTREZ, and GeneSymbol
+# --------------------------------------------------
+
+centroid_driver_scores_annotated <- centroid_driver_scores %>%
+  mutate(
+    UniProt = vapply(ProteinName, pq_to_id, character(1))
+  ) %>%
+  filter(!is.na(UniProt)) %>%
+  separate_rows(UniProt, sep = ";")
+
+annotation_df <- AnnotationDbi::select(
+  org.Hs.eg.db,
+  keys = unique(centroid_driver_scores_annotated$UniProt),
+  columns = c("ENTREZID", "SYMBOL"),
+  keytype = "UNIPROT"
+) %>%
+  distinct(UNIPROT, ENTREZID, SYMBOL)
+
+centroid_driver_scores_annotated <- centroid_driver_scores_annotated %>%
+  left_join(
+    annotation_df,
+    by = c("UniProt" = "UNIPROT")
+  ) %>%
+  rename(
+    ENTREZ = ENTREZID,
+    GeneSymbol = SYMBOL
+  )
+
+# --------------------------------------------------
+# 4. Remove true duplicates per cluster
+#    Keep ALL rows where ENTREZ is NA
+# --------------------------------------------------
+
+centroid_driver_scores_dedup <- centroid_driver_scores_annotated %>%
+  arrange(SubjectCluster, desc(CentroidScore_abs)) %>%
+  group_by(SubjectCluster) %>%
+  filter(
+    is.na(ENTREZ) | !duplicated(ENTREZ)
+  ) %>%
+  ungroup()
+
+# --------------------------------------------------
+# 5. Select top 20% AFTER deduplication
+# --------------------------------------------------
+
+top_20_percent_centroid_drivers <- centroid_driver_scores_dedup %>%
+  group_by(SubjectCluster) %>%
+  mutate(
+    CentroidScore_percentile = percent_rank(CentroidScore_abs)
+  ) %>%
+  filter(CentroidScore_percentile >= 0.80) %>%
+  arrange(SubjectCluster, desc(CentroidScore_abs)) %>%
+  ungroup()
+
+# --------------------------------------------------
+# 6. Summary
+# --------------------------------------------------
+
+top_20_percent_centroid_summary <- top_20_percent_centroid_drivers %>%
+  count(SubjectCluster, Regulation, name = "Number_of_Proteins") %>%
+  arrange(SubjectCluster, Regulation)
+
+print(top_20_percent_centroid_summary)
+print(head(top_20_percent_centroid_drivers, 30))
+
+# --------------------------------------------------
+# 7. Export
+# --------------------------------------------------
+
+write.csv(
+  top_20_percent_centroid_drivers,
+  "AD_Subject_Defining20Percent_Proteins.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  top_20_percent_centroid_summary,
+  "AD_Subject_Defining20Percent_Proteins_Summary.csv",
+  row.names = FALSE
+)
+```
+
+```{r fgsea with centroid score ranking, echo=TRUE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(fgsea)
+library(msigdbr)
+library(purrr)
+
+# --------------------------------------------------
+# 1. Load MSigDB Hallmark pathways
+# --------------------------------------------------
+
+msig_hallmark <- msigdbr(
+  species = "Homo sapiens",
+  category = "H"
+)
+
+pathways_hallmark <- msig_hallmark %>%
+  split(
+    x = .$entrez_gene,
+    f = .$gs_name
+  )
+
+# --------------------------------------------------
+# 2. Run FGSEA separately for each subject cluster
+#    using signed CentroidScore as the ranking statistic
+# --------------------------------------------------
+
+cluster_ids <- sort(
+  unique(centroid_driver_scores_annotated$SubjectCluster)
+)
+
+fgsea_results_list_centroid <- list()
+fgsea_ranks_centroid <- list()
+
+for (clust in cluster_ids) {
+
+  cat("\nRunning CentroidScore FGSEA for Subject Cluster:", clust, "\n")
+
+  cluster_ranked <- centroid_driver_scores_annotated %>%
+    filter(
+      SubjectCluster == clust,
+      !is.na(ENTREZ),
+      !is.na(CentroidScore)
+    ) %>%
+    mutate(
+      ENTREZ = as.character(ENTREZ)
+    ) %>%
+    group_by(ENTREZ) %>%
+    summarize(
+      rank_stat = mean(CentroidScore, na.rm = TRUE),
+      GeneSymbol = paste(unique(na.omit(GeneSymbol)), collapse = ";"),
+      .groups = "drop"
+    ) %>%
+    filter(!is.na(rank_stat)) %>%
+    distinct(ENTREZ, .keep_all = TRUE)
+
+  ranks <- cluster_ranked$rank_stat
+  names(ranks) <- cluster_ranked$ENTREZ
+  ranks <- sort(ranks, decreasing = TRUE)
+
+  fgsea_ranks_centroid[[paste0("Cluster_", clust)]] <- cluster_ranked %>%
+    arrange(desc(rank_stat)) %>%
+    mutate(SubjectCluster = clust)
+
+  fgsea_res <- fgsea(
+    pathways = pathways_hallmark,
+    stats = ranks,
+    minSize = 10,
+    maxSize = 500,
+    nperm = 10000
+  )
+
+  fgsea_res <- fgsea_res %>%
+    as_tibble() %>%
+    arrange(padj) %>%
+    mutate(
+      SubjectCluster = clust
+    )
+
+  fgsea_results_list_centroid[[paste0("Cluster_", clust)]] <- fgsea_res
+}
+
+# --------------------------------------------------
+# 3. Combine FGSEA results
+# --------------------------------------------------
+
+fgsea_results_combined_centroid <- bind_rows(
+  fgsea_results_list_centroid
+)
+
+fgsea_ranks_centroid_df <- bind_rows(
+  fgsea_ranks_centroid
+)
+
+# --------------------------------------------------
+# 4. Significant pathways
+# --------------------------------------------------
+
+fgsea_sig_centroid <- fgsea_results_combined_centroid %>%
+  filter(padj < 0.05) %>%
+  arrange(SubjectCluster, padj)
+
+# --------------------------------------------------
+# 5. Top pathways per cluster
+# --------------------------------------------------
+
+top_fgsea_per_cluster_centroid <- fgsea_sig_centroid %>%
+  group_by(SubjectCluster) %>%
+  slice_min(
+    order_by = padj,
+    n = 10,
+    with_ties = FALSE
+  ) %>%
+  ungroup()
+
+# --------------------------------------------------
+# 6. Convert leadingEdge ENTREZ IDs to Gene Symbols
+# --------------------------------------------------
+
+entrez_to_symbol_centroid <- centroid_driver_scores_annotated %>%
+  select(ENTREZ, GeneSymbol) %>%
+  distinct() %>%
+  filter(!is.na(ENTREZ), !is.na(GeneSymbol)) %>%
+  mutate(
+    ENTREZ = as.character(ENTREZ)
+  )
+
+convert_leading_edge_centroid <- function(entrez_vec) {
+
+  symbols <- entrez_to_symbol_centroid %>%
+    filter(ENTREZ %in% as.character(entrez_vec)) %>%
+    pull(GeneSymbol)
+
+  paste(unique(symbols), collapse = ";")
+}
+
+fgsea_results_combined_centroid <- fgsea_results_combined_centroid %>%
+  mutate(
+    leadingEdgeSymbols = map_chr(
+      leadingEdge,
+      convert_leading_edge_centroid
+    )
+  )
+
+fgsea_sig_centroid <- fgsea_sig_centroid %>%
+  mutate(
+    leadingEdgeSymbols = map_chr(
+      leadingEdge,
+      convert_leading_edge_centroid
+    )
+  )
+
+top_fgsea_per_cluster_centroid <- top_fgsea_per_cluster_centroid %>%
+  mutate(
+    leadingEdgeSymbols = map_chr(
+      leadingEdge,
+      convert_leading_edge_centroid
+    )
+  )
+
+# --------------------------------------------------
+# 7. Export results
+# --------------------------------------------------
+
+fgsea_results_combined_centroid_export <- fgsea_results_combined_centroid %>%
+  mutate(
+    leadingEdge = sapply(leadingEdge, paste, collapse = ";")
+  )
+
+fgsea_sig_centroid_export <- fgsea_sig_centroid %>%
+  mutate(
+    leadingEdge = sapply(leadingEdge, paste, collapse = ";")
+  )
+
+top_fgsea_per_cluster_centroid_export <- top_fgsea_per_cluster_centroid %>%
+  mutate(
+    leadingEdge = sapply(leadingEdge, paste, collapse = ";")
+  )
+
+write.csv(
+  fgsea_results_combined_centroid_export,
+  "FGSEA_CentroidScore_AllResults.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  fgsea_sig_centroid_export,
+  "FGSEA_CentroidScore_SignificantResults.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  fgsea_ranks_centroid_df,
+  "FGSEA_CentroidScore_RankedGenes.csv",
+  row.names = FALSE
+)
+
+# --------------------------------------------------
+# 8. Quick view
+# --------------------------------------------------
+
+print(
+  fgsea_sig_centroid %>%
+    select(
+      SubjectCluster,
+      pathway,
+      NES,
+      padj,
+      leadingEdgeSymbols
+    ) %>%
+    head(50)
+)
+
+print(
+  top_fgsea_per_cluster_centroid %>%
+    select(
+      SubjectCluster,
+      pathway,
+      NES,
+      padj,
+      leadingEdgeSymbols
+    )
+)
+```
+
+```{r fgsea_leading_edge_symbols_and_centroid_direction, echo=TRUE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+# --------------------------------------------------
+# Assumes these already exist:
+# top_fgsea_per_cluster
+# centroid_driver_scores_annotated
+# --------------------------------------------------
+
+# 1. Create ENTREZ -> gene symbol + centroid regulation lookup
+driver_lookup <- centroid_driver_scores_annotated %>%
+  filter(!is.na(ENTREZ)) %>%
+  mutate(
+    ENTREZ = as.character(ENTREZ),
+    CentroidScore = CentroidScore,
+    Regulation = case_when(
+      CentroidScore > 0 ~ "Upregulated in cluster",
+      CentroidScore < 0 ~ "Downregulated in cluster",
+      TRUE ~ "No change"
+    )
+  ) %>%
+  select(
+    SubjectCluster,
+    ENTREZ,
+    GeneSymbol,
+    CentroidScore,
+    Regulation
+  ) %>%
+  distinct()
+
+# 2. Expand leadingEdge genes into one row per pathway-gene
+fgsea_leading_genes_long <- fgsea_sig_centroid %>%
+  select(
+    SubjectCluster,
+    pathway,
+    NES,
+    padj,
+    leadingEdge
+  ) %>%
+  mutate(
+    leadingEdge = map(leadingEdge, as.character)
+  ) %>%
+  unnest_longer(
+    leadingEdge,
+    values_to = "ENTREZ"
+  ) %>%
+  mutate(
+    ENTREZ = as.character(ENTREZ)
+  ) %>%
+  left_join(
+    driver_lookup,
+    by = c("SubjectCluster", "ENTREZ")
+  ) %>%
+  arrange(
+    SubjectCluster,
+    padj,
+    pathway,
+    desc(abs(CentroidScore))
+  )
+
+# 3. Collapse back to one row per pathway with gene symbols and direction
+fgsea_top_pathways_with_leading_symbols <- fgsea_leading_genes_long %>%
+  group_by(
+    SubjectCluster,
+    pathway,
+    NES,
+    padj
+  ) %>%
+  summarize(
+    LeadingGenes_ENTREZ = paste(unique(ENTREZ), collapse = ";"),
+    LeadingGenes_Symbols = paste(unique(na.omit(GeneSymbol)), collapse = ";"),
+    LeadingGenes_Upregulated = paste(
+      unique(na.omit(GeneSymbol[Regulation == "Upregulated in cluster"])),
+      collapse = ";"
+    ),
+    LeadingGenes_Downregulated = paste(
+      unique(na.omit(GeneSymbol[Regulation == "Downregulated in cluster"])),
+      collapse = ";"
+    ),
+    LeadingGene_Directions = paste(
+      unique(na.omit(paste0(GeneSymbol, "=", Regulation))),
+      collapse = ";"
+    ),
+    .groups = "drop"
+  ) %>%
+  arrange(SubjectCluster, padj)
+
+# 4. View and export
+print(
+  fgsea_top_pathways_with_leading_symbols %>%
+    select(
+      SubjectCluster,
+      pathway,
+      NES,
+      padj,
+      LeadingGenes_Symbols,
+      LeadingGenes_Upregulated,
+      LeadingGenes_Downregulated
+    )
+)
+
+write.csv(
+  fgsea_leading_genes_long,
+  "FGSEA_TopPathways_CentroidDirection.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  fgsea_top_pathways_with_leading_symbols,
+  "FGSEA_TopPathwaysPerCluster_WithLeadingGeneSymbols.csv",
+  row.names = FALSE
+)
+```
+
+```{r go standard enrichment with cluster specific drivers, echo=TRUE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggplot2)
+
+# --------------------------------------------------
+# Standard GO enrichment / ORA
+# Using cluster_specific_drivers_annotated
+# High and low cluster-specific proteins tested separately
+# --------------------------------------------------
+
+go_driver_input <- cluster_specific_drivers_annotated %>%
+  filter(
+    !is.na(ENTREZ),
+    !is.na(SubjectCluster),
+    DriverDirection %in% c(
+      "High in cluster vs others",
+      "Low in cluster vs others"
+    )
+  ) %>%
+  mutate(
+    ENTREZ = as.character(ENTREZ),
+    Direction = case_when(
+      DriverDirection == "High in cluster vs others" ~ "High",
+      DriverDirection == "Low in cluster vs others" ~ "Low"
+    ),
+    ClusterDirection = paste0("Cluster_", SubjectCluster, "_", Direction)
+  ) %>%
+  distinct(ClusterDirection, ENTREZ, .keep_all = TRUE)
+
+# --------------------------------------------------
+# Split genes into cluster-direction groups
+# Example: Cluster_1_High, Cluster_1_Low, etc.
+# --------------------------------------------------
+
+go_gene_list <- split(
+  go_driver_input$ENTREZ,
+  go_driver_input$ClusterDirection
+)
+
+# Remove lists with too few genes for meaningful enrichment
+go_gene_list <- go_gene_list[lengths(go_gene_list) >= 5]
+
+# --------------------------------------------------
+# Run GO Biological Process enrichment
+# --------------------------------------------------
+
+go_bp_cluster_drivers <- compareCluster(
+  geneCluster = go_gene_list,
+  fun = "enrichGO",
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.20,
+  readable = TRUE
+)
+
+# --------------------------------------------------
+# Clean results table
+# --------------------------------------------------
+
+go_bp_cluster_drivers_df <- as.data.frame(go_bp_cluster_drivers) %>%
+  separate(
+    Cluster,
+    into = c("ClusterLabel", "SubjectCluster", "Direction"),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  mutate(
+    DriverDirection = case_when(
+      Direction == "High" ~ "High in cluster vs others",
+      Direction == "Low" ~ "Low in cluster vs others"
+    )
+  ) %>%
+  select(
+    SubjectCluster,
+    Direction,
+    DriverDirection,
+    ID,
+    Description,
+    GeneRatio,
+    BgRatio,
+    pvalue,
+    p.adjust,
+    qvalue,
+    geneID,
+    Count
+  ) %>%
+  arrange(as.numeric(SubjectCluster), Direction, p.adjust)
+
+# --------------------------------------------------
+# View top GO terms per cluster/direction
+# --------------------------------------------------
+
+top_go_bp_cluster_drivers <- go_bp_cluster_drivers_df %>%
+  group_by(SubjectCluster, Direction) %>%
+  slice_min(order_by = p.adjust, n = 10, with_ties = FALSE) %>%
+  ungroup()
+
+print(top_go_bp_cluster_drivers)
+
+# --------------------------------------------------
+# Export
+# --------------------------------------------------
+
+write.csv(
+  go_bp_cluster_drivers_df,
+  "GO_BP_StandardEnrichment_ClusterSpecificDrivers_AllResults.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  top_go_bp_cluster_drivers,
+  "GO_BP_StandardEnrichment_ClusterSpecificDrivers_Top10.csv",
+  row.names = FALSE
+)
+
+# --------------------------------------------------
+# Optional dotplot
+# --------------------------------------------------
+
+dotplot(
+  go_bp_cluster_drivers,
+  showCategory = 10,
+  font.size = 8
+) +
+  ggtitle("GO Biological Process Enrichment: Cluster-Specific High and Low Drivers")
+```
+
+
+#Visuals 
+
+```{r isntall complexheatmap}
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+BiocManager::install("ComplexHeatmap")
+
+library(ComplexHeatmap)
+```
+```{r centroid zscore heatmap, echo=TRUE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(circlize)
+library(grid)
+library(ComplexHeatmap)
+
+# --------------------------------------------------
+# 1. Select top centroid-score proteins per cluster
+# --------------------------------------------------
+
+top_n_per_cluster <- 10
+
+proteins_to_plot <- centroid_driver_scores_annotated %>%
+  filter(!is.na(CentroidScore)) %>%
+  group_by(SubjectCluster) %>%
+  slice_max(
+    order_by = abs(CentroidScore),
+    n = top_n_per_cluster,
+    with_ties = FALSE
+  ) %>%
+  ungroup() %>%
+  pull(ProteinName) %>%
+  unique()
+
+proteins_to_plot <- proteins_to_plot[
+  proteins_to_plot %in% colnames(ad_expr_scaled)
+]
+
+stopifnot(length(proteins_to_plot) > 0)
+
+# --------------------------------------------------
+# 2. Order subjects by cluster
+# --------------------------------------------------
+
+subject_order <- subject_cluster_df %>%
+  mutate(
+    Subject = as.character(Subject),
+    SubjectCluster = factor(SubjectCluster)
+  ) %>%
+  arrange(SubjectCluster) %>%
+  pull(Subject)
+
+subject_order <- subject_order[
+  subject_order %in% rownames(ad_expr_scaled)
+]
+
+stopifnot(length(subject_order) > 0)
+
+# --------------------------------------------------
+# 3. Build z-score heatmap matrix
+# --------------------------------------------------
+
+heatmap_mat <- ad_expr_scaled[
+  subject_order,
+  proteins_to_plot,
+  drop = FALSE
+]
+
+heatmap_mat <- t(heatmap_mat)
+
+# 4. Replace row labels with gene symbols
+# --------------------------------------------------
+
+protein_symbol_lookup <- centroid_driver_scores_annotated %>%
+  select(ProteinName, GeneSymbol) %>%
+  distinct() %>%
+  filter(!is.na(ProteinName))
+
+row_symbols <- protein_symbol_lookup$GeneSymbol[
+  match(rownames(heatmap_mat), protein_symbol_lookup$ProteinName)
+]
+
+row_symbols[is.na(row_symbols) | row_symbols == ""] <-
+  rownames(heatmap_mat)[is.na(row_symbols) | row_symbols == ""]
+
+rownames(heatmap_mat) <- make.unique(row_symbols)
+
+
+# --------------------------------------------------
+# 5. Create column split by cluster
+# --------------------------------------------------
+
+subject_cluster_split <- subject_cluster_df %>%
+  mutate(
+    Subject = as.character(Subject),
+    SubjectCluster = paste0("Cluster ", SubjectCluster)
+  ) %>%
+  filter(Subject %in% colnames(heatmap_mat)) %>%
+  arrange(match(Subject, colnames(heatmap_mat))) %>%
+  pull(SubjectCluster)
+
+# --------------------------------------------------
+# 5. Color scale for z-scores
+# --------------------------------------------------
+
+heatmap_colors <- circlize::colorRamp2(
+  c(-2, 0, 2),
+  c("blue", "white", "red")
+)
+
+# --------------------------------------------------
+# 6. Plot heatmap
+# --------------------------------------------------
+
+Heatmap(
+  heatmap_mat,
+  name = "Expression\nz-score",
+  col = heatmap_colors,
+
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+
+  column_split = subject_cluster_split,
+
+  show_row_names = TRUE,
+  show_column_names = FALSE,
+
+  row_names_side = "left",
+  row_names_gp = gpar(fontsize = 10),
+
+  column_title_gp = gpar(
+    fontsize = 11,
+    fontface = "bold"
+  ),
+
+  column_title_side = "top",
+
+  show_column_dend = FALSE,
+  show_row_dend = TRUE,
+
+  heatmap_legend_param = list(
+    title = "Expression\nz-score",
+    at = c(-2, -1, 0, 1, 2)
+  ),
+
+  border = TRUE
+)
+```
+
+```{r PCA graphs}
+
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(ggrepel)
+
+# --------------------------------------------------
+# A. PCA of AD subjects
+# Rows = subjects
+# Columns = proteins
+# --------------------------------------------------
+
+subject_pca <- prcomp(
+  ad_expr_scaled,
+  center = FALSE,
+  scale. = FALSE
+)
+
+subject_pca_df <- as.data.frame(subject_pca$x) %>%
+  rownames_to_column("Subject") %>%
+  left_join(
+    subject_cluster_df %>%
+      mutate(Subject = as.character(Subject)),
+    by = "Subject"
+  ) %>%
+  mutate(
+    SubjectCluster = factor(SubjectCluster)
+  )
+
+subject_var_explained <- round(
+  100 * summary(subject_pca)$importance[2, 1:3],
+  1
+)
+
+p_subject_pc1_pc2 <- ggplot(
+  subject_pca_df,
+  aes(
+    x = PC1,
+    y = PC2,
+    color = SubjectCluster
+  )
+) +
+  geom_point(
+    size = 3,
+    alpha = 0.85
+  ) +
+  stat_ellipse(
+    aes(group = SubjectCluster),
+    linewidth = 0.6,
+    alpha = 0.6,
+    show.legend = FALSE
+  ) +
+  labs(
+    title = "A. PCA of AD Subjects",
+    subtitle = "Subjects clustered by significant protein expression",
+    x = paste0("PC1 (", subject_var_explained[1], "%)"),
+    y = paste0("PC2 (", subject_var_explained[2], "%)"),
+    color = "Subject Cluster"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(
+      size = 18,
+      face = "bold"
+    ),
+    plot.subtitle = element_text(
+      size = 18
+    ),
+    axis.title = element_text(
+      size = 18
+    ),
+    axis.text = element_text(
+      size = 15
+    ),
+   legend.title = element_text(
+    size = 18
+  ),
+  legend.text = element_text(
+    size = 15
+  ),
+  legend.position = "right"
+)
+
+print(p_subject_pc1_pc2)
+
+# --------------------------------------------------
+# B. PCA of proteins
+# Rows = proteins
+# Columns = subjects
+# --------------------------------------------------
+
+protein_pca <- prcomp(
+  t(ad_expr_scaled),
+  center = FALSE,
+  scale. = FALSE
+)
+
+protein_pca_df <- as.data.frame(protein_pca$x) %>%
+  rownames_to_column("ProteinName")
+
+protein_var_explained <- round(
+  100 * summary(protein_pca)$importance[2, 1:3],
+  1
+)
+
+# Assign each protein to the subject cluster where it has
+# the strongest absolute centroid expression
+protein_cluster_assignment <- cluster_driver_scores %>%
+  group_by(ProteinName) %>%
+  slice_max(
+    order_by = abs(DriverScore),
+    n = 1,
+    with_ties = FALSE
+  ) %>%
+  ungroup() %>%
+  transmute(
+    ProteinName,
+    StrongestSubjectCluster = factor(SubjectCluster),
+    DriverScore,
+    DriverDirection
+  )
+
+protein_pca_df <- protein_pca_df %>%
+  left_join(
+    protein_cluster_assignment,
+    by = "ProteinName"
+  )
+
+p_protein_pc1_pc2 <- ggplot(
+  protein_pca_df,
+  aes(
+    x = PC1,
+    y = PC2,
+    color = StrongestSubjectCluster
+  )
+) +
+  geom_point(
+    size = 2.5,
+    alpha = 0.75
+  ) +
+  labs(
+    title = "B. PCA of Proteins",
+    subtitle = "Proteins colored by strongest associated subject cluster",
+    x = paste0("PC1 (", protein_var_explained[1], "%)"),
+    y = paste0("PC2 (", protein_var_explained[2], "%)"),
+    color = "Strongest Subject Cluster"
+  ) +
+  theme_bw() +
+  theme(
+  plot.title = element_text(
+      size = 18,
+      face = "bold"
+    ),
+    plot.subtitle = element_text(
+      size = 18
+    ),
+    axis.title = element_text(
+      size = 18
+    ),
+    axis.text = element_text(
+      size = 15
+    ),
+   legend.title = element_text(
+    size = 18
+  ),
+  legend.text = element_text(
+    size = 15
+  ),
+  legend.position = "right"
+)
+
+print(p_protein_pc1_pc2)
+
+# --------------------------------------------------
+# Optional exports
+# --------------------------------------------------
+
+write.csv(
+  subject_pca_df,
+  "AD_Subject_PCA_Coordinates.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  protein_pca_df,
+  "AD_Protein_PCA_Coordinates.csv",
+  row.names = FALSE
+)
+
+```
+
+```{r dementia group breakdown per cluster, echo=TRUE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# --------------------------------------------------
+# Cluster composition by Dementia_group
+# --------------------------------------------------
+
+cluster_dementia_df <- ad_subject_data %>%
+  select(Subject, Dementia_group) %>%
+  mutate(Subject = as.character(Subject)) %>%
+  left_join(
+    subject_cluster_df %>%
+      mutate(Subject = as.character(Subject)),
+    by = "Subject"
+  ) %>%
+  filter(!is.na(SubjectCluster))
+
+# Counts and percentages
+cluster_dementia_summary <- cluster_dementia_df %>%
+  count(SubjectCluster, Dementia_group, name = "n") %>%
+  group_by(SubjectCluster) %>%
+  mutate(
+    cluster_total = sum(n),
+    percent = 100 * n / cluster_total
+  ) %>%
+  ungroup() %>%
+  arrange(SubjectCluster, desc(n))
+
+print(cluster_dementia_summary, n = Inf)
+
+# Wide table
+cluster_dementia_wide <- cluster_dementia_summary %>%
+  select(SubjectCluster, Dementia_group, n, percent) %>%
+  pivot_wider(
+    names_from = Dementia_group,
+    values_from = c(n, percent),
+    values_fill = 0
+  )
+
+print(cluster_dementia_wide, n = Inf)
+
+# Dominant dementia group per cluster
+dominant_dementia_by_cluster <- cluster_dementia_summary %>%
+  group_by(SubjectCluster) %>%
+  slice_max(order_by = percent, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(
+    SubjectCluster,
+    DominantDementiaGroup = Dementia_group,
+    n,
+    cluster_total,
+    percent
+  )
+
+print(dominant_dementia_by_cluster, n = Inf)
+
+# Bar plot
+ggplot(cluster_dementia_summary,
+       aes(x = factor(SubjectCluster), y = percent, fill = Dementia_group)) +
+  geom_col(position = "stack") +
+  labs(
+    x = "Subject Cluster",
+    y = "Percent of subjects",
+    fill = "Dementia group",
+  ) +
+  theme_bw(
+  base_size = 16,
+  base_family = "Aptos"
+)
+
+# Export
+write.csv(
+  cluster_dementia_wide,
+  "Cluster_DementiaGroup_Composition.csv",
+  row.names = FALSE
+)
+
+```
+
+```{r Fisher test for DEM vs MCI, echo=TRUE, message=FALSE, warning=FALSE}
+# --------------------------------------------------
+# Fisher's exact tests for dementia-group enrichment
+# --------------------------------------------------
+
+clusters <- unique(cluster_dementia_df$SubjectCluster)
+dementia_groups <- unique(cluster_dementia_df$Dementia_group)
+
+fisher_results <- expand.grid(
+  SubjectCluster = clusters,
+  Dementia_group = dementia_groups,
+  stringsAsFactors = FALSE
+) %>%
+  rowwise() %>%
+  mutate(
+    test = list({
+      
+      # 2 x 2 contingency table
+      tab <- table(
+        InCluster = cluster_dementia_df$SubjectCluster == SubjectCluster,
+        InDementiaGroup = cluster_dementia_df$Dementia_group == Dementia_group
+      )
+      
+      fisher.test(tab)
+    }),
+    
+    Odds_Ratio = unname(test$estimate),
+    p_value = test$p.value
+  ) %>%
+  ungroup() %>%
+  select(
+    SubjectCluster,
+    Dementia_group,
+    Odds_Ratio,
+    p_value
+  )
+
+# Correct for testing multiple cluster/group combinations
+fisher_results <- fisher_results %>%
+  mutate(
+    adj_p_value = p.adjust(p_value, method = "BH")
+  ) %>%
+  arrange(adj_p_value)
+
+print(fisher_results, n = Inf)
+
+```
+
+```{r graphs for age and sex}
+library(dplyr)
+library(ggplot2)
+
+# --------------------------------------------------
+# Add age and sex to subject cluster assignments
+# --------------------------------------------------
+
+# --------------------------------------------------
+# Add age and sex to subject cluster assignments
+# --------------------------------------------------
+
+cluster_demographics_df <- protein_quants_sci_rep %>%
+  filter(Pathology_group == "AD") %>%
+  select(
+    Subject,
+    Gender,
+    Age = Age.at.time.of.LP..yrs.
+  ) %>%
+  mutate(
+    Subject = as.character(Subject),
+    Gender = case_when(
+      Gender == 0 ~ "Male",
+      Gender == 1 ~ "Female",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  left_join(
+    subject_cluster_df %>%
+      mutate(Subject = as.character(Subject)),
+    by = "Subject"
+  ) %>%
+  filter(!is.na(SubjectCluster))
+
+
+# --------------------------------------------------
+# SEX: counts and percentages by cluster
+# --------------------------------------------------
+
+cluster_sex_summary <- cluster_demographics_df %>%
+  count(SubjectCluster, Gender, name = "n") %>%
+  group_by(SubjectCluster) %>%
+  mutate(
+    cluster_total = sum(n),
+    percent = 100 * n / cluster_total
+  ) %>%
+  ungroup()
+
+print(cluster_sex_summary, n = Inf)
+
+
+# Percentage stacked bar plot
+ggplot(
+  cluster_sex_summary,
+  aes(
+    x = factor(SubjectCluster),
+    y = percent,
+    fill = factor(Gender)
+  )
+) +
+  geom_col() +
+  labs(
+    x = "Subject Cluster",
+    y = "Percent of subjects",
+    fill = "Sex",
+  ) +
+  theme_bw(
+  base_size = 16,
+)
+
+
+# --------------------------------------------------
+# AGE: descriptive statistics by cluster
+# --------------------------------------------------
+
+cluster_age_summary <- cluster_demographics_df %>%
+  group_by(SubjectCluster) %>%
+  summarise(
+    n = n(),
+    Mean_Age = mean(Age, na.rm = TRUE),
+    SD_Age = sd(Age, na.rm = TRUE),
+    Median_Age = median(Age, na.rm = TRUE),
+    Min_Age = min(Age, na.rm = TRUE),
+    Max_Age = max(Age, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(cluster_age_summary)
+
+
+# --------------------------------------------------
+# AGE: boxplot
+# --------------------------------------------------
+
+ggplot(
+  cluster_demographics_df,
+  aes(
+    x = factor(SubjectCluster),
+    y = Age
+  )
+) +
+  geom_boxplot() +
+  labs(
+    x = "Subject Cluster",
+    y = "Age at lumbar puncture (years)",
+  ) +
+  theme_bw(
+  base_size = 16,
+)
+
+#Summary per cluster
+cluster_sex_summary <- cluster_demographics_df %>%
+  filter(!is.na(Gender)) %>%
+  count(SubjectCluster, Gender, name = "n") %>%
+  group_by(SubjectCluster) %>%
+  mutate(
+    Total = sum(n),
+    Percent = round(100 * n / Total, 1)
+  ) %>%
+  ungroup()
+
+print(cluster_sex_summary, n = Inf)
+```
+```{r Fisher tests, Kruskal-Wallis for sex, age}
+# ==================================================
+# STATISTICAL TESTING OF DEMOGRAPHICS ACROSS CLUSTERS
+# ==================================================
+
+
+# --------------------------------------------------
+# 1. SEX: Fisher's exact test
+# --------------------------------------------------
+
+# Create contingency table
+sex_cluster_table <- table(
+  cluster_demographics_df$SubjectCluster,
+  cluster_demographics_df$Gender
+)
+
+print(sex_cluster_table)
+
+
+# Fisher's exact test
+sex_fisher <- fisher.test(
+  sex_cluster_table,
+  simulate.p.value = TRUE,
+  B = 100000
+)
+
+print(sex_fisher)
+
+
+# --------------------------------------------------
+# 2. AGE: Kruskal-Wallis test
+# --------------------------------------------------
+
+age_kw <- kruskal.test(
+  Age ~ factor(SubjectCluster),
+  data = cluster_demographics_df
+)
+
+print(age_kw)
+
+```
+
+```{r analyse age differences per cluster}
+library(dplyr)
+
+# --------------------------------------------------
+# Age summary by cluster
+# --------------------------------------------------
+
+cluster_age_direction <- cluster_demographics_df %>%
+  group_by(SubjectCluster) %>%
+  summarise(
+    n = sum(!is.na(Age)),
+    Mean_Age = mean(Age, na.rm = TRUE),
+    Median_Age = median(Age, na.rm = TRUE),
+    Q1 = quantile(Age, 0.25, na.rm = TRUE),
+    Q3 = quantile(Age, 0.75, na.rm = TRUE),
+    Min_Age = min(Age, na.rm = TRUE),
+    Max_Age = max(Age, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(cluster_age_direction)
+```
+
+```{r histograms for age, per cluster}
+ggplot(
+  cluster_demographics_df,
+  aes(
+    x = Age,
+    fill = factor(SubjectCluster)
+  )
+) +
+  geom_histogram(
+    binwidth = 5,
+    boundary = 0,
+    color = "black"
+  ) +
+  facet_wrap(~ SubjectCluster) +
+  labs(
+    x = "Age at lumbar puncture (years)",
+    y = "Number of subjects",
+    fill = "Subject Cluster",
+  ) +
+  theme_bw(
+    base_size = 16,
+  ) +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_text(size = 20)
+  )
+```
+
+```{r heatmap of significant FGSEA pathways}
+
+# ============================================================
+# FGSEA SIGNIFICANTLY ENRICHED PATHWAYS — HEATMAP
+# ============================================================
+
+library(tidyverse)
+
+# ------------------------------------------------------------
+# 1. Create FGSEA pathway dataset
+# ------------------------------------------------------------
+
+fgsea_heatmap <- data.frame(
+
+  Cluster = c(
+    1, 1,
+    2, 2, 2, 2, 2, 2,
+    3,
+    4, 4, 4,
+    5, 5, 5,
+    6, 6, 6, 6
+  ),
+
+  Pathway = c(
+    "Hypoxia",
+    "Coagulation",
+
+    "Coagulation",
+    "Complement",
+    "Glycolysis",
+    "Xenobiotic Metabolism",
+    "Apical Junction",
+    "mTORC1 Signaling",
+
+    "Coagulation",
+
+    "Coagulation",
+    "Xenobiotic Metabolism",
+    "Complement",
+
+    "Coagulation",
+    "Complement",
+    "Xenobiotic Metabolism",
+
+    "EMT",
+    "Apoptosis",
+    "Coagulation",
+    "Complement"
+  ),
+
+  NES = c(
+     1.822912,
+    -2.823680,
+
+     3.247282,
+     2.072079,
+    -2.118690,
+     2.226707,
+    -2.052930,
+    -1.839370,
+
+    -2.672410,
+
+    -3.293170,
+    -2.480080,
+    -2.133440,
+
+     4.126371,
+     1.782236,
+     2.094819,
+
+     2.475710,
+     1.878532,
+     1.686864,
+     1.663394
+  )
+)
+
+
+# ------------------------------------------------------------
+# 2. Define pathway order
+# ------------------------------------------------------------
+
+pathway_order <- c(
+  "Hypoxia",
+  "Glycolysis",
+  "mTORC1 Signaling",
+  "Apical Junction",
+  "Xenobiotic Metabolism",
+  "Coagulation",
+  "Complement",
+  "EMT",
+  "Apoptosis"
+)
+
+
+# ------------------------------------------------------------
+# 3. Expand to all pathway x cluster combinations
+# ------------------------------------------------------------
+
+heatmap_df <- expand_grid(
+  Cluster = 1:6,
+  Pathway = pathway_order
+) %>%
+
+  left_join(
+    fgsea_heatmap,
+    by = c("Cluster", "Pathway")
+  ) %>%
+
+  mutate(
+
+    Cluster = factor(
+      Cluster,
+      levels = 1:6,
+      labels = paste0("Cluster ", 1:6)
+    ),
+
+    Pathway = factor(
+      Pathway,
+      levels = pathway_order
+    ),
+
+    PlotStrength = NES
+  ) %>%
+
+  mutate(
+    Pathway = forcats::fct_rev(Pathway)
+  )
+
+
+# ------------------------------------------------------------
+# 4. Create heatmap
+# ------------------------------------------------------------
+
+fgsea_pathway_heatmap <- ggplot(
+  heatmap_df,
+  aes(
+    x = Cluster,
+    y = Pathway,
+    fill = PlotStrength
+  )
+) +
+
+  geom_tile(
+    color = "white",
+    linewidth = 0.7
+  ) +
+
+  scale_fill_gradient2(
+    low = "#2166AC",
+    mid = "white",
+    high = "#B2182B",
+    midpoint = 0,
+    na.value = "grey90",
+    name = "NES"
+  ) +
+
+  labs(
+    x = "Cluster",
+    y = "Pathways"
+  ) +
+
+  theme_classic(base_size = 12) +
+
+  theme(
+
+    # White plot and figure background
+    panel.background = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    plot.background = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    legend.background = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    legend.key = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    # Remove axis lines/ticks around heatmap
+    axis.line = element_blank(),
+    axis.ticks = element_blank(),
+
+    # Main title
+    plot.title = element_text(
+      face = "bold",
+      size = 16,
+      hjust = 0.5
+    ),
+
+    # Axis titles
+    axis.title.x = element_text(
+      face = "bold",
+      size = 12
+    ),
+
+    axis.title.y = element_text(
+      face = "bold",
+      size = 12
+    ),
+
+    # Axis labels
+    axis.text.x = element_text(
+      face = "bold",
+      size = 11
+    ),
+
+    axis.text.y = element_text(
+      size = 10
+    ),
+
+    legend.position = "right"
+  )
+
+
+# ------------------------------------------------------------
+# 5. Display heatmap
+# ------------------------------------------------------------
+
+fgsea_pathway_heatmap
+
+
+```
+
+
+
+```{R heatmap of top 15 GO Term Themes}
+# ============================================================
+# TOP 15 GO BIOLOGICAL PROCESS THEMES — HEATMAP
+# ============================================================
+
+library(tidyverse)
+
+# ------------------------------------------------------------
+# 1. Load remapped GO theme data
+# ------------------------------------------------------------
+
+go_heatmap <- read.csv(
+  "GO_BP_Top15_Themes_Heatmap_REMAPPED_v2.csv",
+  check.names = FALSE
+)
+
+
+# ------------------------------------------------------------
+# 2. Prepare data
+# ------------------------------------------------------------
+
+heatmap_df <- go_heatmap %>%
+  mutate(
+
+    Cluster = factor(
+      Cluster,
+      levels = 1:6,
+      labels = paste0("Cluster ", 1:6)
+    ),
+
+    Theme = factor(
+      Theme,
+      levels = unique(
+        Theme[order(Theme_Rank)]
+      )
+    ),
+
+    PlotStrength = Signed_NegLog10_FDR
+  ) %>%
+
+  mutate(
+    Theme = forcats::fct_rev(Theme)
+  )
+
+
+# ------------------------------------------------------------
+# 3. Set legend limits
+# ------------------------------------------------------------
+
+legend_limit <- max(
+  abs(heatmap_df$PlotStrength),
+  na.rm = TRUE
+)
+
+
+# ------------------------------------------------------------
+# 4. Create heatmap
+# ------------------------------------------------------------
+
+go_top15_heatmap <- ggplot(
+  heatmap_df,
+  aes(
+    x = Cluster,
+    y = Theme,
+    fill = PlotStrength
+  )
+) +
+
+  geom_tile(
+    color = "white",
+    linewidth = 0.7
+  ) +
+
+  scale_fill_gradient2(
+    low = "#2166AC",
+    mid = "white",
+    high = "#B2182B",
+    midpoint = 0,
+    limits = c(-legend_limit, legend_limit),
+    breaks = c(-legend_limit, legend_limit),
+    labels = c(
+      "Negative",
+      "Positive"
+    ),
+    na.value = "grey90",
+    name = "Enrichment"
+  ) +
+
+  labs(
+    x = "Cluster",
+    y = "GO Term Themes"
+  ) +
+
+  theme_classic(base_size = 12) +
+
+  theme(
+
+    # White plot and figure background
+    panel.background = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    plot.background = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    legend.background = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    legend.key = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    # Remove axis lines/ticks around heatmap
+    axis.line = element_blank(),
+    axis.ticks = element_blank(),
+
+    # Main title
+    plot.title = element_text(
+      face = "bold",
+      size = 16,
+      hjust = 0.5
+    ),
+
+    # Axis titles
+    axis.title.x = element_text(
+      face = "bold",
+      size = 14
+    ),
+
+    axis.title.y = element_text(
+      face = "bold",
+      size = 14
+    ),
+
+    # Axis labels
+    axis.text.x = element_text(
+      face = "bold",
+      size = 12
+    ),
+
+    axis.text.y = element_text(
+      size = 12
+    ),
+
+    # Legend
+    legend.title = element_text(
+      face = "bold",
+      size = 12
+    ),
+
+    legend.text = element_text(
+      size = 11
+    ),
+
+    legend.position = "right"
+  )
+
+
+# ------------------------------------------------------------
+# 5. Display heatmap
+# ------------------------------------------------------------
+
+go_top15_heatmap
+```
+
+```{r heatmaps for complement and coagulation proteins}
+# ============================================================
+# FGSEA LEADING-EDGE PROTEIN HEATMAPS
+# COAGULATION + COMPLEMENT
+# ============================================================
+
+library(tidyverse)
+
+
+# ============================================================
+# 1. COAGULATION LEADING-EDGE DATA
+# ============================================================
+
+coagulation_fgsea <- tribble(
+  ~Cluster, ~NES, ~padj, ~LeadingEdge,
+
+  1, -2.823680, 0.036822,
+  "A2M;APOA1;APOC1;APOC3;C1S;C2;C3;C8A;C8B;C8G;C9;CFB;CFD;CFH;CFI;CPB2;CPN1;F12;F13B;F2;F9;FGA;FGG;FN1;GSN;HRG;ITIH1;KLKB1;PLG;SERPINA1;SERPINC1;TF",
+
+  2, 3.247282, 0.003556,
+  "APOA1;APOC1;APOC3;C2;C3;C8A;C8B;C8G;C9;CFB;CFD;CFH;CFI;CPB2;CPN1;F10;F12;F13B;F2;F9;FGA;FGG;GSN;HRG;ITIH1;KLKB1;PLG;PROS1;SERPINA1;SERPINC1;SERPING1;TF",
+
+  3, -2.672410, 0.035120,
+  "APOA1;APOC1;APOC3;C2;C8A;C8B;C8G;CFB;CFI;CPB2;CPN1;CTSH;F12;F13B;F2;F9;FGA;FGG;HRG;ITIH1;KLKB1;PLG;SERPINC1",
+
+  4, -3.293170, 0.003789,
+  "APOA1;APOC1;APOC3;C2;C3;C8A;C8B;C8G;C9;CFB;CFH;CFI;CPB2;CPN1;F10;F12;F13B;F2;F9;FBN1;FGA;FGG;GSN;HRG;ITIH1;KLKB1;MMP2;PLG;PROS1;SERPINA1;SERPINC1;SERPING1;TF;TIMP1",
+
+  5, 4.126371, 0.033333,
+  "APOA1;APOC1;APOC3;C2;C3;C8A;C8B;C8G;C9;CFB;CFH;CFI;CPB2;CPN1;F10;F12;F13B;F2;F9;FGA;FGG;HRG;ITIH1;KLKB1;PLG;SERPINA1;SERPINC1;TF",
+
+  6, 1.686864, 0.043341,
+  "A2M;C1QA;C1R;C1S;C2;C3;C9;CFB;CFD;CFH;CFI;CPB2;CPQ;CTSB;FBN1;FN1;GSN;HTRA1;MMP2;PROS1;SERPINA1;SERPING1;SPARC;TIMP1"
+)
+
+
+# ------------------------------------------------------------
+# Expand leading-edge genes
+# ------------------------------------------------------------
+
+coagulation_long <- coagulation_fgsea %>%
+  separate_rows(
+    LeadingEdge,
+    sep = ";"
+  ) %>%
+  rename(
+    Protein = LeadingEdge
+  )
+
+
+# ------------------------------------------------------------
+# Get all proteins appearing in any coagulation leading edge
+# ------------------------------------------------------------
+
+coagulation_proteins <- coagulation_long %>%
+  distinct(Protein) %>%
+  pull(Protein)
+
+
+# ------------------------------------------------------------
+# Create complete protein x cluster matrix
+# ------------------------------------------------------------
+
+coagulation_heatmap_df <- expand_grid(
+  Protein = coagulation_proteins,
+  Cluster = 1:6
+) %>%
+
+  left_join(
+    coagulation_long %>%
+      select(
+        Cluster,
+        Protein,
+        NES,
+        padj
+      ),
+    by = c(
+      "Cluster",
+      "Protein"
+    )
+  ) %>%
+
+  mutate(
+    Cluster = factor(
+      Cluster,
+      levels = 1:6,
+      labels = paste0("Cluster ", 1:6)
+    )
+  )
+
+
+# ------------------------------------------------------------
+# Order proteins by how often they appear across clusters
+# ------------------------------------------------------------
+
+coagulation_order <- coagulation_heatmap_df %>%
+  group_by(Protein) %>%
+  summarise(
+    N_Clusters = sum(!is.na(NES)),
+    .groups = "drop"
+  ) %>%
+  arrange(
+    N_Clusters,
+    Protein
+  ) %>%
+  pull(Protein)
+
+
+coagulation_heatmap_df <- coagulation_heatmap_df %>%
+  mutate(
+    Protein = factor(
+      Protein,
+      levels = coagulation_order
+    )
+  )
+
+
+# ------------------------------------------------------------
+# Symmetric NES scale
+# ------------------------------------------------------------
+
+coag_limit <- max(
+  abs(coagulation_heatmap_df$NES),
+  na.rm = TRUE
+)
+
+
+# ============================================================
+# 2. COAGULATION HEATMAP
+# ============================================================
+
+coagulation_heatmap <- ggplot(
+  coagulation_heatmap_df,
+  aes(
+    x = Cluster,
+    y = Protein,
+    fill = NES
+  )
+) +
+
+  geom_tile(
+    color = "white",
+    linewidth = 0.7
+  ) +
+
+  scale_fill_gradient2(
+    low = "#2166AC",
+    mid = "white",
+    high = "#B2182B",
+    midpoint = 0,
+    limits = c(-coag_limit, coag_limit),
+    na.value = "grey90",
+    name = "NES"
+  ) +
+
+  labs(
+    x = "Cluster",
+    y = "Protein"
+  ) +
+
+  theme_classic(
+    base_size = 12,
+    base_family = "Aptos"
+  ) +
+
+  theme(
+
+    panel.background = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    plot.background = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    legend.background = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    legend.key = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    axis.line = element_blank(),
+    axis.ticks = element_blank(),
+
+    plot.title = element_text(
+      face = "bold",
+      size = 16,
+      hjust = 0.5
+    ),
+
+    axis.title.x = element_text(
+      face = "bold",
+      size = 14
+    ),
+
+    axis.title.y = element_text(
+      face = "bold",
+      size = 14
+    ),
+
+    axis.text.x = element_text(
+      face = "bold",
+      size = 12
+    ),
+
+    axis.text.y = element_text(
+      size = 11
+    ),
+
+    legend.title = element_text(
+      face = "bold",
+      size = 11
+    ),
+
+    legend.text = element_text(
+      size = 10
+    ),
+
+    legend.position = "right"
+  )
+
+
+coagulation_heatmap
+
+
+
+# ============================================================
+# 3. COMPLEMENT LEADING-EDGE DATA
+# ============================================================
+
+complement_fgsea <- tribble(
+  ~Cluster, ~NES, ~padj, ~LeadingEdge,
+
+  1, 0.964147, 0.697484,
+  "CLU;CPQ;CTSB;CTSD;CTSH;CTSL;F5;HSPA5;LRP1;PRCP;SPOCK2",
+
+  2, 2.072079, 0.003556,
+  "APOA4;APOC1;C2;C3;C9;CFB;CP;F2;ITIH1;KLKB1;PLG;SERPINA1;SERPINC1",
+
+  3, -1.383680, 0.132550,
+  "APOC1;C2;CP;CTSC;CTSD;CTSH;F2;ITIH1;KLKB1;PLG;PRCP;SERPINC1",
+
+  4, -2.133440, 0.004927,
+  "APOA4;APOC1;C2;C3;C9;CFB;CFH;CP;F10;F2;ITIH1;KLKB1;PLG;SERPINA1;SERPINC1;SERPING1;TIMP2",
+
+  5, 1.782236, 0.033333,
+  "APOA4;APOC1;C2;C3;C9;CFB;CFH;CP;F10;F2;ITIH1;KLKB1;PLG;SERPINA1;SERPINC1",
+
+  6, 1.663394, 0.043914,
+  "C1QA;C1QC;C1R;C1S;C2;C3;C9;CFB;CFH;COL4A2;CPQ;CP;CTSB;CTSC;CTSD;CTSS;F5;FN1;SERPINA1;SERPING1;TIMP1;TIMP2"
+)
+
+
+# ------------------------------------------------------------
+# Expand leading-edge genes
+# ------------------------------------------------------------
+
+complement_long <- complement_fgsea %>%
+  separate_rows(
+    LeadingEdge,
+    sep = ";"
+  ) %>%
+  rename(
+    Protein = LeadingEdge
+  )
+
+
+# ------------------------------------------------------------
+# Get all proteins represented in complement leading edges
+# ------------------------------------------------------------
+
+complement_proteins <- complement_long %>%
+  distinct(Protein) %>%
+  pull(Protein)
+
+
+# ------------------------------------------------------------
+# Create complete protein x cluster matrix
+# ------------------------------------------------------------
+
+complement_heatmap_df <- expand_grid(
+  Protein = complement_proteins,
+  Cluster = 1:6
+) %>%
+
+  left_join(
+    complement_long %>%
+      select(
+        Cluster,
+        Protein,
+        NES,
+        padj
+      ),
+    by = c(
+      "Cluster",
+      "Protein"
+    )
+  ) %>%
+
+  mutate(
+    Cluster = factor(
+      Cluster,
+      levels = 1:6,
+      labels = paste0("Cluster ", 1:6)
+    )
+  )
+
+
+# ------------------------------------------------------------
+# Order proteins by number of clusters in which they occur
+# ------------------------------------------------------------
+
+complement_order <- complement_heatmap_df %>%
+  group_by(Protein) %>%
+  summarise(
+    N_Clusters = sum(!is.na(NES)),
+    .groups = "drop"
+  ) %>%
+  arrange(
+    N_Clusters,
+    Protein
+  ) %>%
+  pull(Protein)
+
+
+complement_heatmap_df <- complement_heatmap_df %>%
+  mutate(
+    Protein = factor(
+      Protein,
+      levels = complement_order
+    )
+  )
+
+
+# ------------------------------------------------------------
+# Symmetric NES scale
+# ------------------------------------------------------------
+
+complement_limit <- max(
+  abs(complement_heatmap_df$NES),
+  na.rm = TRUE
+)
+
+
+# ============================================================
+# 4. COMPLEMENT HEATMAP
+# ============================================================
+
+complement_heatmap <- ggplot(
+  complement_heatmap_df,
+  aes(
+    x = Cluster,
+    y = Protein,
+    fill = NES
+  )
+) +
+
+  geom_tile(
+    color = "white",
+    linewidth = 0.7
+  ) +
+
+  scale_fill_gradient2(
+    low = "#2166AC",
+    mid = "white",
+    high = "#B2182B",
+    midpoint = 0,
+    limits = c(-complement_limit, complement_limit),
+    na.value = "grey90",
+    name = "NES"
+  ) +
+
+  labs(
+    x = "Cluster",
+    y = "Protein"
+  ) +
+
+  theme_classic(
+    base_size = 12,
+    base_family = "Aptos"
+  ) +
+
+  theme(
+
+    panel.background = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    plot.background = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    legend.background = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    legend.key = element_rect(
+      fill = "white",
+      color = NA
+    ),
+
+    axis.line = element_blank(),
+    axis.ticks = element_blank(),
+
+    plot.title = element_text(
+      face = "bold",
+      size = 16,
+      hjust = 0.5
+    ),
+
+    axis.title.x = element_text(
+      face = "bold",
+      size = 14
+    ),
+
+    axis.title.y = element_text(
+      face = "bold",
+      size = 14
+    ),
+
+    axis.text.x = element_text(
+      face = "bold",
+      size = 12
+    ),
+
+    axis.text.y = element_text(
+      size = 11
+    ),
+
+    legend.title = element_text(
+      face = "bold",
+      size = 11
+    ),
+
+    legend.text = element_text(
+      size = 10
+    ),
+
+    legend.position = "right"
+  )
+
+
+complement_heatmap
+```
+
+
+#VISUAL TABLES
+
+```{r Hypoxia table}
+library(gt)
+library(dplyr)
+
+drug_table_hypoxia <- data.frame(
+  Theme = "HALLMARK_HYPOXIA",
+  `Drug Type` = "Protein Synthesis Inhibitor",
+  Compound = "Emetine Dihydrochloride Hydrate (74)",
+  Cluster = 1,
+  check.names = FALSE
+)
+
+drug_table_hypoxia %>%
+  gt::gt() %>%
+
+  gt::tab_header(
+    title = gt::md(
+      "**Hypoxia-associated perturbations**"
+    )
+  ) %>%
+
+  gt::cols_hide(
+    columns = Theme
+  ) %>%
+
+  gt::cols_width(
+    `Drug Type` ~ gt::px(285),
+    Compound ~ gt::px(350),
+    Cluster ~ gt::px(100)
+  ) %>%
+
+  gt::cols_align(
+    align = "left",
+    columns = c(`Drug Type`, Compound)
+  ) %>%
+
+  gt::cols_align(
+    align = "center",
+    columns = Cluster
+  ) %>%
+
+  gt::tab_style(
+    style = gt::cell_text(
+      weight = "bold"
+    ),
+    locations = gt::cells_column_labels()
+  ) %>%
+
+  gt::tab_style(
+    style = gt::cell_text(
+      weight = "bold",
+      size = gt::px(16),
+      align = "left"
+    ),
+    locations = gt::cells_title(
+      groups = "title"
+    )
+  ) %>%
+
+  gt::tab_options(
+    heading.background.color = "#F2F2F2",
+    column_labels.background.color = "#E6E6E6",
+    table.font.size = gt::px(12),
+    data_row.padding = gt::px(8),
+    table_body.hlines.color = "#DDDDDD"
+  )
+```
+
+```{r Coagulation Complement Table}
+library(gt)
+library(dplyr)
+
+drug_table_coag_comp <- data.frame(
+  Theme = c(
+    "HALLMARK_COAGULATION + HALLMARK_COMPLEMENT",
+    "HALLMARK_COAGULATION + HALLMARK_COMPLEMENT",
+    "HALLMARK_COAGULATION + HALLMARK_COMPLEMENT",
+    "HALLMARK_COAGULATION + HALLMARK_COMPLEMENT",
+    "HALLMARK_COAGULATION + HALLMARK_COMPLEMENT",
+    "HALLMARK_COAGULATION + HALLMARK_COMPLEMENT",
+    "HALLMARK_COAGULATION + HALLMARK_COMPLEMENT",
+    "HALLMARK_COAGULATION + HALLMARK_COMPLEMENT",
+    "HALLMARK_COAGULATION + HALLMARK_COMPLEMENT",
+    "HALLMARK_COAGULATION + HALLMARK_COMPLEMENT",
+    "HALLMARK_COAGULATION + HALLMARK_COMPLEMENT",
+    "HALLMARK_COAGULATION + HALLMARK_COMPLEMENT"
+  ),
+  `Drug Class` = c(
+    "Plant Derivatives",
+    "Plant Derivatives",
+    "BTK Inhibitors",
+    "BTK Inhibitors",
+    "MAPK Inhibitor",
+    "MAPK Inhibitor",
+    "MAPK Inhibitor",
+    "CDK Inhibitor",
+    "PI3K and mTOR Inhibitors",
+    "HDAC Inhibitors",
+    "HDAC Inhibitors",
+    "Translocator Protein"
+  ),
+  Compound = c(
+    "Homoharringtonine",
+    "Parthenolide",
+    "QL-XII-47",
+    "QL-X-138",
+    "SB203580",
+    "BRD-A60245366",
+    "JNK-9L",
+    "CGP-60474",
+    "NVP-BGT226",
+    "BRD-K77908580 (Entinostat)",
+    "Vorinostat",
+    "PK11195"
+  ),
+  `Cluster(s)` = c(
+    "1, 3",
+    "3",
+    "1",
+    "3",
+    "2",
+    "2",
+    "4",
+    "4",
+    "4",
+    "5",
+    "5", 
+    "6"
+  ),
+  check.names = FALSE
+)
+
+drug_table_coag_comp %>%
+  gt::gt() %>%
+
+  gt::tab_header(
+    title = gt::md(
+      "**Coagulation + complement-associated perturbations**"
+    )
+  ) %>%
+
+  gt::cols_hide(
+    columns = Theme
+  ) %>%
+
+  gt::cols_width(
+    `Drug Class` ~ gt::px(285),
+    Compound ~ gt::px(350),
+    `Cluster(s)` ~ gt::px(100)
+  ) %>%
+
+  gt::cols_align(
+    align = "left",
+    columns = c(`Drug Class`, Compound)
+  ) %>%
+
+  gt::cols_align(
+    align = "center",
+    columns = `Cluster(s)`
+  ) %>%
+
+  gt::tab_style(
+    style = gt::cell_text(
+      weight = "bold"
+    ),
+    locations = gt::cells_column_labels()
+  ) %>%
+
+  gt::tab_style(
+    style = gt::cell_text(
+      weight = "bold",
+      size = gt::px(16),
+      align = "left"
+    ),
+    locations = gt::cells_title(
+      groups = "title"
+    )
+  ) %>%
+
+  gt::tab_options(
+    heading.background.color = "#F2F2F2",
+    column_labels.background.color = "#E6E6E6",
+    table.font.size = gt::px(12),
+    data_row.padding = gt::px(8),
+    table_body.hlines.color = "#DDDDDD"
+  )
+```
+
+```{r Glycolysis Table}
+library(gt)
+library(dplyr)
+
+drug_table_glycolysis <- data.frame(
+  Theme = "HALLMARK_GLYCOLYSIS",
+  `Drug Class` = "JNK Inhibitor",
+  Compound = "BRD-A60245366",
+  Cluster = 2,
+  check.names = FALSE
+)
+
+drug_table_glycolysis %>%
+  gt::gt() %>%
+
+  gt::tab_header(
+    title = gt::md(
+      "**Glycolysis-associated perturbations**"
+    )
+  ) %>%
+
+  gt::cols_hide(
+    columns = Theme
+  ) %>%
+
+  gt::cols_width(
+    `Drug Class` ~ gt::px(285),
+    Compound ~ gt::px(350),
+    Cluster ~ gt::px(100)
+  ) %>%
+
+  gt::cols_align(
+    align = "left",
+    columns = c(`Drug Class`, Compound)
+  ) %>%
+
+  gt::cols_align(
+    align = "center",
+    columns = Cluster
+  ) %>%
+
+  gt::tab_style(
+    style = gt::cell_text(
+      weight = "bold"
+    ),
+    locations = gt::cells_column_labels()
+  ) %>%
+
+  gt::tab_style(
+    style = gt::cell_text(
+      weight = "bold",
+      size = gt::px(16),
+      align = "left"
+    ),
+    locations = gt::cells_title(
+      groups = "title"
+    )
+  ) %>%
+
+  gt::tab_options(
+    heading.background.color = "#F2F2F2",
+    column_labels.background.color = "#E6E6E6",
+    table.font.size = gt::px(12),
+    data_row.padding = gt::px(8),
+    table_body.hlines.color = "#DDDDDD"
+  )
+```
+
+
+```{r Apical Junction Table}
+library(gt)
+library(dplyr)
+
+drug_table_apical <- data.frame(
+  Theme = c(
+    "HALLMARK_APICAL_JUNCTION",
+    "HALLMARK_APICAL_JUNCTION"
+  ),
+  `Drug Class` = c(
+    "JNK Inhibitor",
+    "p38 MAPK Inhibitor"
+  ),
+  Compound = c(
+    "BRD-A60245366",
+    "SB-203580"
+  ),
+  Cluster = c(2, 2),
+  check.names = FALSE
+)
+
+drug_table_apical %>%
+  gt::gt() %>%
+
+  gt::tab_header(
+    title = gt::md(
+      "**Apical junction-associated perturbations**"
+    )
+  ) %>%
+
+  gt::cols_hide(
+    columns = Theme
+  ) %>%
+
+  gt::cols_width(
+    `Drug Class` ~ gt::px(285),
+    Compound ~ gt::px(350),
+    Cluster ~ gt::px(100)
+  ) %>%
+
+  gt::cols_align(
+    align = "left",
+    columns = c(`Drug Class`, Compound)
+  ) %>%
+
+  gt::cols_align(
+    align = "center",
+    columns = Cluster
+  ) %>%
+
+  gt::tab_style(
+    style = gt::cell_text(
+      weight = "bold"
+    ),
+    locations = gt::cells_column_labels()
+  ) %>%
+
+  gt::tab_style(
+    style = gt::cell_text(
+      weight = "bold",
+      size = gt::px(16),
+      align = "left"
+    ),
+    locations = gt::cells_title(
+      groups = "title"
+    )
+  ) %>%
+
+  gt::tab_options(
+    heading.background.color = "#F2F2F2",
+    column_labels.background.color = "#E6E6E6",
+    table.font.size = gt::px(12),
+    data_row.padding = gt::px(8),
+    table_body.hlines.color = "#DDDDDD"
+  )
+
+```
+
+```{r MTORC1 Table}
+library(gt)
+library(dplyr)
+
+drug_table_mtorc1 <- data.frame(
+  Theme = "HALLMARK_MTORC1_SIGNALING",
+  `Drug Class` = "Topoisomerase II Inhibitor",
+  Compound = "Amsacrine",
+  Cluster = 2,
+  check.names = FALSE
+)
+
+drug_table_mtorc1 %>%
+  gt::gt() %>%
+
+  gt::tab_header(
+    title = gt::md(
+      "**mTORC1 signaling-associated perturbations**"
+    )
+  ) %>%
+
+  gt::cols_hide(
+    columns = Theme
+  ) %>%
+
+  gt::cols_width(
+    `Drug Class` ~ gt::px(285),
+    Compound ~ gt::px(350),
+    Cluster ~ gt::px(100)
+  ) %>%
+
+  gt::cols_align(
+    align = "left",
+    columns = c(`Drug Class`, Compound)
+  ) %>%
+
+  gt::cols_align(
+    align = "center",
+    columns = Cluster
+  ) %>%
+
+  gt::tab_style(
+    style = gt::cell_text(
+      weight = "bold"
+    ),
+    locations = gt::cells_column_labels()
+  ) %>%
+
+  gt::tab_style(
+    style = gt::cell_text(
+      weight = "bold",
+      size = gt::px(16),
+      align = "left"
+    ),
+    locations = gt::cells_title(
+      groups = "title"
+    )
+  ) %>%
+
+  gt::tab_options(
+    heading.background.color = "#F2F2F2",
+    column_labels.background.color = "#E6E6E6",
+    table.font.size = gt::px(12),
+    data_row.padding = gt::px(8),
+    table_body.hlines.color = "#DDDDDD"
+  )
+```
+
+```{r Xenobiotic Metabolism Table}
+library(gt)
+library(dplyr)
+
+drug_table_xeno <- data.frame(
+  Theme = c(
+    "HALLMARK_XENOBIOTIC_METABOLISM",
+    "HALLMARK_XENOBIOTIC_METABOLISM"
+  ),
+  `Drug Class` = c(
+    "Topical Corticosteroid",
+    "HDAC Inhibitor"
+  ),
+  Compound = c(
+    "Halcinonide",
+    "BRD-K77908580 (Entinostat)"
+  ),
+  Cluster = c(4, 5),
+  check.names = FALSE
+)
+
+drug_table_xeno %>%
+  gt::gt() %>%
+
+  gt::tab_header(
+    title = gt::md(
+      "**Xenobiotic metabolism-associated perturbations**"
+    )
+  ) %>%
+
+  gt::cols_hide(
+    columns = Theme
+  ) %>%
+
+  gt::cols_width(
+    `Drug Class` ~ gt::px(285),
+    Compound ~ gt::px(350),
+    Cluster ~ gt::px(100)
+  ) %>%
+
+  gt::cols_align(
+    align = "left",
+    columns = c(`Drug Class`, Compound)
+  ) %>%
+
+  gt::cols_align(
+    align = "center",
+    columns = Cluster
+  ) %>%
+
+  gt::tab_style(
+    style = gt::cell_text(
+      weight = "bold"
+    ),
+    locations = gt::cells_column_labels()
+  ) %>%
+
+  gt::tab_style(
+    style = gt::cell_text(
+      weight = "bold",
+      size = gt::px(16),
+      align = "left"
+    ),
+    locations = gt::cells_title(
+      groups = "title"
+    )
+  ) %>%
+
+  gt::tab_options(
+    heading.background.color = "#F2F2F2",
+    column_labels.background.color = "#E6E6E6",
+    table.font.size = gt::px(12),
+    data_row.padding = gt::px(8),
+    table_body.hlines.color = "#DDDDDD"
+  )
+```
+
+```{r EMT and Apoptosis Table}
+library(gt)
+library(dplyr)
+
+# Create Cluster 6 EMT + Apoptosis table
+drug_table2 <- data.frame(
+  Theme = c(
+    "Epithelial–Mesenchymal Transition + Apoptosis",
+    "Epithelial–Mesenchymal Transition + Apoptosis",
+    "Epithelial–Mesenchymal Transition + Apoptosis"
+  ),
+  `Drug Class` = c(
+    "Kinetin-Ribosides",
+    "PLK1 Inhibitor",
+    "Translocator Protein"
+  ),
+  Compound = c(
+    "BRD-K94325918",
+    "BI-2536",
+    "PK11195"
+  ),
+  Cluster = c(6, 6, 6),
+  check.names = FALSE
+)
+
+drug_table2 %>%
+  gt::gt() %>%
+
+  # Put FGSEA theme at the very top
+  gt::tab_header(
+    title = gt::md(
+      "**Epithelial–mesenchymal transition + apoptosis-associated perturbations**"
+    )
+  ) %>%
+
+  # We don't need Theme as a displayed column
+  gt::cols_hide(
+    columns = Theme
+  ) %>%
+
+  gt::cols_width(
+    `Drug Class` ~ gt::px(285),
+    Compound ~ gt::px(350),
+    Cluster ~ gt::px(100)
+  ) %>%
+
+  gt::cols_align(
+    align = "left",
+    columns = c(`Drug Class`, Compound)
+  ) %>%
+
+  gt::cols_align(
+    align = "center",
+    columns = Cluster
+  ) %>%
+
+  # Column headers
+  gt::tab_style(
+    style = gt::cell_text(
+      weight = "bold"
+    ),
+    locations = gt::cells_column_labels()
+  ) %>%
+
+  # Style title
+  gt::tab_style(
+    style = gt::cell_text(
+      weight = "bold",
+      size = gt::px(16),
+      align = "left"
+    ),
+    locations = gt::cells_title(
+      groups = "title"
+    )
+  ) %>%
+
+  gt::tab_options(
+    heading.background.color = "#F2F2F2",
+    column_labels.background.color = "#E6E6E6",
+    table.font.size = gt::px(12),
+    data_row.padding = gt::px(8),
+    table_body.hlines.color = "#DDDDDD"
+  )
+```
+
+
+#APPENDICES 
+
+```{r Subject and Protein Table}
+subject_cluster_demographics_proteins <- protein_quants_sci_rep %>%
+  mutate(
+    Subject = as.character(Subject)
+  ) %>%
+  inner_join(
+    subject_cluster_df %>%
+      mutate(Subject = as.character(Subject)),
+    by = "Subject"
+  ) %>%
+  select(
+    Subject,
+    SubjectCluster,
+    Age = Age.at.time.of.LP..yrs.,
+    Gender,
+    Dementia_group,
+    Pathology_group,
+    all_of(sig_feature_names)
+  ) %>%
+  mutate(
+    Gender = case_when(
+      Gender == 0 ~ "Male",
+      Gender == 1 ~ "Female",
+      TRUE ~ as.character(Gender)
+    )
+  ) %>%
+  arrange(SubjectCluster, Subject) %>%
+  mutate(
+    Subject = row_number()
+  )
+
+# Check
+head(subject_cluster_demographics_proteins)
+
+# Export
+write.csv(
+  subject_cluster_demographics_proteins,
+  "Appendix_C_AD_Subject_Clusters_Demographics_Proteins.csv",
+  row.names = FALSE
+)
+```
